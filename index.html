@@ -1047,18 +1047,12 @@ async function loadDB() {
   });
 }
 
-let _isSaving = false;
-
 async function saveDB() {
-  _isSaving = true;
   try {
     await window._fbSet(fbPath('soirevente'), DB);
   } catch(e) {
     console.error('Firebase save error', e);
     showToast('⚠ Erreur sauvegarde', 'red');
-  } finally {
-    // Short grace period so the onValue echo doesn't overwrite our local state
-    setTimeout(() => { _isSaving = false; }, 1500);
   }
 }
 
@@ -1595,27 +1589,46 @@ function closeAssoc() {
 
 function confirmAssoc(itemId) {
   if (!pendingAssoc) return;
-  const { code, mode, offName } = pendingAssoc;
+  const { code, mode } = pendingAssoc;
   const item = DB.items.find(i => i.id === itemId);
   if (!item) return;
 
-  // Save barcode association
-  item.barcode = code;
-  // If OFF gave a better name and item still has default name, optionally update
-  // (we keep the user's catalog name — just link the barcode)
-
-  saveDB();
   closeAssoc();
-  showToast(`✓ "${item.name}" associé au code`, 'teal');
-  vibrate();
 
-  // Now process the original action
+  // 1. Associate barcode in memory
+  item.barcode = code;
+
+  // 2. Apply the action in memory (no saveDB inside — we pass skipSave flag)
   if (mode === 'add') {
-    processAdd(item);
+    const sbUnit = item.units.find(u => u.status === 'standby');
+    if (sbUnit) {
+      sbUnit.status = 'available';
+      addLog('add', 'green', item.name, `Stand-by → Disponible · ${item.units.filter(u=>u.status==='available').length} dispo`);
+      document.getElementById('scanResultAdd').innerHTML = `<span class="srp-icon">✅</span><div class="srp-text"><strong>${item.name}</strong>Associé & unité activée !</div>`;
+    } else {
+      item.units.push({ id: uid(), status: 'available' });
+      addLog('add', 'teal', item.name, `+1 unité · Total: ${item.units.length}`);
+      document.getElementById('scanResultAdd').innerHTML = `<span class="srp-icon">➕</span><div class="srp-text"><strong>${item.name}</strong>Associé & unité ajoutée.</div>`;
+    }
+    pendingScan.add = null; lastScanned.add = null;
+    document.getElementById('btnAdd').disabled = true;
   } else if (mode === 'conso') {
-    processConsoItem(item);
+    const unit = item.units.find(u => u.status === 'available');
+    if (unit) {
+      unit.status = 'consumed';
+      const remaining = item.units.filter(u => u.status === 'available').length;
+      addLog('conso', 'green', item.name, `Consommé · ${remaining} restant(s)`);
+      document.getElementById('scanResultConso').innerHTML = `<span class="srp-icon">✅</span><div class="srp-text"><strong>${item.name}</strong>Associé & consommé · ${remaining} restante(s)</div>`;
+    } else {
+      document.getElementById('scanResultConso').innerHTML = `<span class="srp-icon">⚠️</span><div class="srp-text"><strong>${item.name}</strong>Associé, mais aucune unité dispo.</div>`;
+    }
+    lastScanned.conso = null;
   }
 
+  // 3. Single save with all mutations applied
+  saveDB();
+  showToast(`✓ "${item.name}" associé`, 'teal');
+  vibrate();
   renderMenu();
   updateHeader();
 }
@@ -1852,7 +1865,6 @@ async function boot() {
 
   // Listen for real-time updates
   window._fbOnValue(window._fbRef(window._fbDB, 'soirevente'), (snap) => {
-    if (_isSaving) return; // Ignore our own echo
     if (snap.exists()) {
       DB = snap.val();
       if (!DB.items) DB.items = [];
