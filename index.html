@@ -1501,6 +1501,43 @@ async function lookupOFF(barcode) {
   }
 }
 
+// Retourne l'article du catalogue dont le nom partage au moins un mot significatif
+// avec le nom OFF (ou la marque). Retourne null si aucune correspondance.
+const STOP_WORDS = new Set(['de','du','des','le','la','les','un','une','a','au','aux','et','en','with','the','of']);
+function fuzzyMatchItem(offName, offBrand) {
+  if (!offName) return null;
+  const normalize = s => s.toLowerCase()
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .split(/\s+/)
+    .filter(w => w.length > 2 && !STOP_WORDS.has(w));
+
+  const offWords = new Set([
+    ...normalize(offName),
+    ...normalize(offBrand || '')
+  ]);
+
+  if (offWords.size === 0) return null;
+
+  let bestItem = null;
+  let bestScore = 0;
+
+  for (const item of DB.items) {
+    if (item.barcode && item.barcode !== '') continue; // already associated
+    const itemWords = normalize(item.name);
+    let score = 0;
+    for (const w of itemWords) {
+      if (offWords.has(w)) { score += 2; continue; }
+      for (const ow of offWords) {
+        if (ow.startsWith(w) || w.startsWith(ow)) { score += 1; break; }
+      }
+    }
+    if (score > bestScore) { bestScore = score; bestItem = item; }
+  }
+
+  return bestScore >= 1 ? bestItem : null;
+}
+
 /* ══════════════════════════════════════
    ASSOCIATION MODAL
 ══════════════════════════════════════ */
@@ -1587,11 +1624,11 @@ function confirmAssoc(itemId) {
    SCAN ADD
 ══════════════════════════════════════ */
 function handleAdd(code) {
-  // 1. Check barcodes already saved in DB
   const existing = DB.items.find(i => i.barcode === code);
   const el = document.getElementById('scanResultAdd');
   const btn = document.getElementById('btnAdd');
 
+  // 1. Barcode already known in DB
   if (existing) {
     el.innerHTML = `<span class="srp-icon">📦</span><div class="srp-text"><strong>${existing.name}</strong>${existing.cat} · ${existing.units.filter(u=>u.status==='available').length}/${existing.units.length} dispo<br>Confirmer ?</div>`;
     pendingScan.add = { code, known: true, item: existing };
@@ -1601,30 +1638,32 @@ function handleAdd(code) {
     return;
   }
 
-  // 2. Unknown — open modal immediately with spinner, update after OFF fetch
+  // 2. Unknown — search OFF, try auto-association
   vibrate();
-  showToast('Code scanné — association requise', 'teal');
   el.innerHTML = `<span class="srp-icon">🔍</span><div class="srp-text">Recherche Open Food Facts…</div>`;
   btn.disabled = true;
 
-  // Open modal right away with loading state
-  openAssocModal(code, 'add', 'loading');
-
   lookupOFF(code).then(offData => {
-    // Update the already-open modal with results
-    const offResult = document.getElementById('assocOffResult');
-    const offLoading = document.getElementById('assocOffLoading');
-    const offNotFound = document.getElementById('assocOffNotFound');
-    offLoading.classList.add('hidden');
     if (offData && offData.name) {
-      document.getElementById('assocOffName').textContent = offData.name;
-      document.getElementById('assocOffBrand').textContent = offData.brand || '';
-      offResult.classList.remove('hidden');
-      if (pendingAssoc) { pendingAssoc.offName = offData.name; pendingAssoc.offBrand = offData.brand; }
+      const match = fuzzyMatchItem(offData.name, offData.brand);
+      if (match) {
+        // Auto-associate silently
+        match.barcode = code;
+        saveDB();
+        showToast(`✓ Auto-associé : "${match.name}"`, 'green');
+        vibrate();
+        el.innerHTML = `<span class="srp-icon">🔗</span><div class="srp-text"><strong>${match.name}</strong>Associé via "${offData.name}"<br>Confirmer ?</div>`;
+        pendingScan.add = { code, known: true, item: match };
+        btn.disabled = false;
+        return;
+      }
+      // No match — open modal with OFF info pre-filled
       el.innerHTML = `<span class="srp-icon">🍀</span><div class="srp-text"><strong>${offData.name}</strong>Associer à un article ?</div>`;
+      openAssocModal(code, 'add', offData);
     } else {
-      offNotFound.classList.remove('hidden');
+      // OFF not found — open modal manually
       el.innerHTML = `<span class="srp-icon">❓</span><div class="srp-text"><strong>Code: ${code}</strong>Non trouvé. Association manuelle.</div>`;
+      openAssocModal(code, 'add', null);
     }
   });
 }
@@ -1663,36 +1702,38 @@ function confirmAdd() {
 function handleConsoScan(code) {
   const item = DB.items.find(i => i.barcode === code);
 
-  if (!item) {
-    // Unknown barcode — open modal immediately, update after OFF fetch
-    vibrate();
-    showToast('Code scanné — association requise', 'teal');
-    document.getElementById('scanResultConso').innerHTML = `<span class="srp-icon">🔍</span><div class="srp-text">Recherche Open Food Facts…</div>`;
-
-    openAssocModal(code, 'conso', 'loading');
-
-    lookupOFF(code).then(offData => {
-      const offResult = document.getElementById('assocOffResult');
-      const offLoading = document.getElementById('assocOffLoading');
-      const offNotFound = document.getElementById('assocOffNotFound');
-      offLoading.classList.add('hidden');
-      if (offData && offData.name) {
-        document.getElementById('assocOffName').textContent = offData.name;
-        document.getElementById('assocOffBrand').textContent = offData.brand || '';
-        offResult.classList.remove('hidden');
-        if (pendingAssoc) { pendingAssoc.offName = offData.name; pendingAssoc.offBrand = offData.brand; }
-        document.getElementById('scanResultConso').innerHTML = `<span class="srp-icon">🍀</span><div class="srp-text"><strong>${offData.name}</strong>Associer à un article ?</div>`;
-      } else {
-        offNotFound.classList.remove('hidden');
-        document.getElementById('scanResultConso').innerHTML = `<span class="srp-icon">❓</span><div class="srp-text"><strong>Code: ${code}</strong>Non trouvé. Association manuelle.</div>`;
-      }
-    });
+  // 1. Barcode known — process directly
+  if (item) {
+    document.getElementById('scanResultConso').innerHTML = `<span class="srp-icon">✅</span><div class="srp-text"><strong>${item.name}</strong>Produit reconnu…</div>`;
+    processConsoItem(item);
     return;
   }
 
-  // Product found in DB — process directly, no modal
-  document.getElementById('scanResultConso').innerHTML = `<span class="srp-icon">✅</span><div class="srp-text"><strong>${item.name}</strong>Produit reconnu…</div>`;
-  processConsoItem(item);
+  // 2. Unknown — search OFF, try auto-association
+  vibrate();
+  document.getElementById('scanResultConso').innerHTML = `<span class="srp-icon">🔍</span><div class="srp-text">Recherche Open Food Facts…</div>`;
+
+  lookupOFF(code).then(offData => {
+    if (offData && offData.name) {
+      const match = fuzzyMatchItem(offData.name, offData.brand);
+      if (match) {
+        // Auto-associate then consume
+        match.barcode = code;
+        saveDB();
+        showToast(`✓ Auto-associé : "${match.name}"`, 'green');
+        document.getElementById('scanResultConso').innerHTML = `<span class="srp-icon">🔗</span><div class="srp-text"><strong>${match.name}</strong>Associé via "${offData.name}"</div>`;
+        processConsoItem(match);
+        return;
+      }
+      // No match — open modal with OFF info
+      document.getElementById('scanResultConso').innerHTML = `<span class="srp-icon">🍀</span><div class="srp-text"><strong>${offData.name}</strong>Associer à un article ?</div>`;
+      openAssocModal(code, 'conso', offData);
+    } else {
+      // OFF not found — open modal manually
+      document.getElementById('scanResultConso').innerHTML = `<span class="srp-icon">❓</span><div class="srp-text"><strong>Code: ${code}</strong>Non trouvé. Association manuelle.</div>`;
+      openAssocModal(code, 'conso', null);
+    }
+  });
 }
 
 function processConsoItem(item) {
