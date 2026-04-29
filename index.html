@@ -589,6 +589,72 @@
       text-transform: uppercase; color: var(--text-dim); width: 100%;
     }
     .admin-pin-error { font-size: 11px; color: var(--red); min-height: 16px; margin-bottom: 8px; }
+    /* ── ASSOCIATION MODAL ── */
+    #assocModal {
+      position: fixed; inset: 0; z-index: 8200;
+      background: rgba(6,13,20,0.92); backdrop-filter: blur(16px);
+      display: flex; align-items: flex-end; justify-content: center;
+      padding-bottom: var(--safe-bottom);
+    }
+    #assocModal.hidden { display: none; }
+    .assoc-box {
+      background: linear-gradient(180deg, var(--bg3) 0%, var(--bg2) 100%);
+      border: 1px solid var(--border-m); border-bottom: none;
+      border-radius: var(--radius) var(--radius) 0 0;
+      padding: 24px 20px 28px;
+      width: 100%; max-width: 430px;
+      max-height: 85dvh; overflow-y: auto;
+      animation: slideUp 0.3s cubic-bezier(.34,1.2,.64,1);
+    }
+    @keyframes slideUp {
+      from { transform: translateY(100%); opacity: 0; }
+      to { transform: translateY(0); opacity: 1; }
+    }
+    .assoc-title { font-size: 16px; font-weight: 500; color: var(--text); margin-bottom: 4px; }
+    .assoc-code {
+      font-family: 'Space Mono', monospace; font-size: 11px; color: var(--teal);
+      background: var(--teal-dim); padding: 3px 10px; border-radius: 4px;
+      display: inline-block; margin-bottom: 14px; letter-spacing: 0.08em;
+    }
+    .assoc-off {
+      background: var(--bg); border: 1px solid rgba(34,211,122,0.2);
+      border-radius: var(--radius-sm); padding: 12px 14px; margin-bottom: 14px;
+    }
+    .assoc-off-label { font-size: 9px; color: var(--green); letter-spacing: 0.14em; text-transform: uppercase; margin-bottom: 6px; font-family: 'Space Mono', monospace; }
+    .assoc-off-name { font-size: 14px; color: var(--text); font-weight: 500; }
+    .assoc-off-brand { font-size: 11px; color: var(--text-dim); margin-top: 2px; }
+    .assoc-loading {
+      display: flex; align-items: center; gap: 10px;
+      font-size: 12px; color: var(--text-dim); margin-bottom: 14px; padding: 8px 0;
+    }
+    .assoc-spinner {
+      width: 14px; height: 14px; border-radius: 50%;
+      border: 2px solid var(--teal-dim); border-top-color: var(--teal);
+      animation: spin 0.7s linear infinite; flex-shrink: 0;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .assoc-not-found { font-size: 12px; color: var(--text-dim); margin-bottom: 14px; padding: 8px 0; }
+    .assoc-sep {
+      font-size: 9px; letter-spacing: 0.2em; text-transform: uppercase;
+      color: var(--text-dim); font-family: 'Space Mono', monospace;
+      margin-bottom: 10px; padding-top: 6px;
+      border-top: 1px solid var(--border);
+    }
+    .assoc-list { display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px; }
+    .assoc-item {
+      display: flex; align-items: center; gap: 12px;
+      padding: 11px 14px; border-radius: var(--radius-sm);
+      background: var(--bg); border: 1px solid var(--border);
+      cursor: pointer; transition: all 0.15s;
+    }
+    .assoc-item:active { background: var(--teal-dim); border-color: var(--teal); }
+    .assoc-item-icon { font-size: 18px; flex-shrink: 0; }
+    .assoc-item-info { flex: 1; }
+    .assoc-item-name { font-size: 13px; color: var(--text); }
+    .assoc-item-cat { font-size: 10px; color: var(--text-dim); margin-top: 1px; }
+    .assoc-item-arrow { color: var(--teal); font-size: 14px; }
+    .assoc-item.already { opacity: 0.45; cursor: default; }
+    .assoc-item.already .assoc-item-arrow { color: var(--green); }
   </style>
 </head>
 <body>
@@ -771,6 +837,29 @@
       </div>
     </div>
 
+  </div>
+</div>
+
+<!-- ── ASSOCIATION MODAL ── -->
+<div id="assocModal" class="hidden">
+  <div class="assoc-box">
+    <div class="assoc-title">🔗 Associer ce produit</div>
+    <div class="assoc-code" id="assocCode">—</div>
+
+    <!-- OFF result -->
+    <div id="assocOffResult" class="assoc-off hidden">
+      <div class="assoc-off-label">Trouvé sur Open Food Facts</div>
+      <div class="assoc-off-name" id="assocOffName">—</div>
+      <div class="assoc-off-brand" id="assocOffBrand">—</div>
+    </div>
+    <div id="assocOffLoading" class="assoc-loading hidden">
+      <div class="assoc-spinner"></div><span>Recherche Open Food Facts…</span>
+    </div>
+    <div id="assocOffNotFound" class="assoc-not-found hidden">Produit non trouvé sur Open Food Facts</div>
+
+    <div class="assoc-sep">Associer à un article de la liste</div>
+    <div class="assoc-list" id="assocList"></div>
+    <button class="admin-cancel" onclick="closeAssoc()">Annuler</button>
   </div>
 </div>
 
@@ -1330,65 +1419,199 @@ function handleBarcode(code, mode) {
   if (mode === 'conso') handleConsoScan(code);
 }
 
+/* ══════════════════════════════════════
+   OPEN FOOD FACTS
+══════════════════════════════════════ */
+async function lookupOFF(barcode) {
+  try {
+    const r = await fetch(`https://world.openfoodfacts.org/api/v2/product/${barcode}?fields=product_name,brands,categories_tags`, { signal: AbortSignal.timeout(5000) });
+    if (!r.ok) return null;
+    const d = await r.json();
+    if (d.status !== 1 || !d.product) return null;
+    return {
+      name: d.product.product_name || '',
+      brand: d.product.brands || '',
+    };
+  } catch { return null; }
+}
+
+/* ══════════════════════════════════════
+   ASSOCIATION MODAL
+══════════════════════════════════════ */
+let pendingAssoc = null; // { code, mode, offName, offBrand }
+
+async function openAssocModal(code, mode, offData) {
+  pendingAssoc = { code, mode };
+  document.getElementById('assocCode').textContent = code;
+
+  // OFF section
+  const offResult = document.getElementById('assocOffResult');
+  const offLoading = document.getElementById('assocOffLoading');
+  const offNotFound = document.getElementById('assocOffNotFound');
+  offResult.classList.add('hidden');
+  offNotFound.classList.add('hidden');
+
+  if (offData === 'loading') {
+    offLoading.classList.remove('hidden');
+  } else if (offData) {
+    offLoading.classList.add('hidden');
+    document.getElementById('assocOffName').textContent = offData.name || '(nom inconnu)';
+    document.getElementById('assocOffBrand').textContent = offData.brand || '';
+    offResult.classList.remove('hidden');
+    pendingAssoc.offName = offData.name;
+    pendingAssoc.offBrand = offData.brand;
+  } else {
+    offLoading.classList.add('hidden');
+    offNotFound.classList.remove('hidden');
+  }
+
+  // Build item list
+  const list = document.getElementById('assocList');
+  list.innerHTML = DB.items.map(item => {
+    const hasCode = item.barcode && item.barcode !== '';
+    return `<div class="assoc-item ${hasCode ? 'already' : ''}" onclick="${hasCode ? '' : `confirmAssoc('${item.id}')`}">
+      <span class="assoc-item-icon">${CAT_ICONS[item.cat] || '📦'}</span>
+      <div class="assoc-item-info">
+        <div class="assoc-item-name">${item.name}</div>
+        <div class="assoc-item-cat">${item.cat}${hasCode ? ' · déjà associé' : ''}</div>
+      </div>
+      <span class="assoc-item-arrow">${hasCode ? '✓' : '›'}</span>
+    </div>`;
+  }).join('');
+
+  document.getElementById('assocModal').classList.remove('hidden');
+}
+
+function closeAssoc() {
+  document.getElementById('assocModal').classList.add('hidden');
+  pendingAssoc = null;
+  // Re-allow same barcode to be scanned
+  if (pendingAssoc) lastScanned[pendingAssoc.mode] = null;
+  lastScanned.add = null;
+  lastScanned.conso = null;
+}
+
+function confirmAssoc(itemId) {
+  if (!pendingAssoc) return;
+  const { code, mode, offName } = pendingAssoc;
+  const item = DB.items.find(i => i.id === itemId);
+  if (!item) return;
+
+  // Save barcode association
+  item.barcode = code;
+  // If OFF gave a better name and item still has default name, optionally update
+  // (we keep the user's catalog name — just link the barcode)
+
+  saveDB();
+  closeAssoc();
+  showToast(`✓ "${item.name}" associé au code`, 'teal');
+  vibrate();
+
+  // Now process the original action
+  if (mode === 'add') {
+    processAdd(item);
+  } else if (mode === 'conso') {
+    processConsoItem(item);
+  }
+
+  renderMenu();
+  updateHeader();
+}
+
+/* ══════════════════════════════════════
+   SCAN ADD
+══════════════════════════════════════ */
 function handleAdd(code) {
+  // 1. Check barcodes already saved in DB
   const existing = DB.items.find(i => i.barcode === code);
   const el = document.getElementById('scanResultAdd');
   const btn = document.getElementById('btnAdd');
+
   if (existing) {
-    el.innerHTML = `<span class="srp-icon">📦</span><div class="srp-text"><strong>${existing.name}</strong>${existing.cat} · ${existing.units.length} unité(s) en liste<br>Ajouter une unité ?</div>`;
+    el.innerHTML = `<span class="srp-icon">📦</span><div class="srp-text"><strong>${existing.name}</strong>${existing.cat} · ${existing.units.filter(u=>u.status==='available').length}/${existing.units.length} dispo<br>Confirmer ?</div>`;
     pendingScan.add = { code, known: true, item: existing };
-  } else {
-    el.innerHTML = `<span class="srp-icon">❓</span><div class="srp-text"><strong>Code: ${code}</strong>Produit inconnu. Sera ajouté comme nouveau.</div>`;
-    pendingScan.add = { code, known: false };
+    btn.disabled = false;
+    vibrate();
+    showToast('✓ ' + existing.name + ' reconnu', 'teal');
+    return;
   }
-  btn.disabled = false;
+
+  // 2. Unknown — lookup OFF then show association modal
   vibrate();
-  showToast('Code détecté !', 'teal');
+  showToast('Code scanné — recherche…', 'teal');
+  el.innerHTML = `<span class="srp-icon">🔍</span><div class="srp-text">Recherche Open Food Facts…</div>`;
+  btn.disabled = true;
+
+  lookupOFF(code).then(offData => {
+    if (offData && offData.name) {
+      el.innerHTML = `<span class="srp-icon">🍀</span><div class="srp-text"><strong>${offData.name}</strong>${offData.brand ? offData.brand + ' · ' : ''}Associer à un article ?</div>`;
+    } else {
+      el.innerHTML = `<span class="srp-icon">❓</span><div class="srp-text"><strong>Code: ${code}</strong>Non trouvé sur Open Food Facts.<br>Association manuelle.</div>`;
+    }
+    openAssocModal(code, 'add', offData);
+  });
 }
 
-function confirmAdd() {
-  if (!pendingScan.add) return;
-  const { code, known, item } = pendingScan.add;
-  const newUnit = { id: uid(), status: 'available' };
-  if (known) {
-    item.units.push(newUnit);
-    addLog('add', 'green', item.name, `+1 unité · Total: ${item.units.length}`);
-    showToast('✓ Unité ajoutée : ' + item.name, 'green');
+function processAdd(item) {
+  const el = document.getElementById('scanResultAdd');
+  // Activate first standby unit, or add new available unit
+  const sbUnit = item.units.find(u => u.status === 'standby');
+  if (sbUnit) {
+    sbUnit.status = 'available';
+    addLog('add', 'green', item.name, `Stand-by → Disponible · ${item.units.filter(u=>u.status==='available').length} dispo`);
+    showToast('✓ ' + item.name + ' activé', 'green');
+    el.innerHTML = `<span class="srp-icon">✅</span><div class="srp-text"><strong>${item.name}</strong>Unité activée !</div>`;
   } else {
-    const newItem = {
-      id: uid(), barcode: code,
-      name: 'Produit ' + code.slice(-4),
-      cat: 'Non classé',
-      units: [newUnit]
-    };
-    DB.items.push(newItem);
-    addLog('add', 'teal', 'Nouveau produit', code);
-    showToast('✓ Nouveau produit ajouté', 'teal');
+    const newUnit = { id: uid(), status: 'available' };
+    item.units.push(newUnit);
+    addLog('add', 'teal', item.name, `+1 unité · Total: ${item.units.length}`);
+    showToast('✓ Unité ajoutée : ' + item.name, 'teal');
+    el.innerHTML = `<span class="srp-icon">➕</span><div class="srp-text"><strong>${item.name}</strong>Nouvelle unité ajoutée.</div>`;
   }
   saveDB(); updateHeader();
   pendingScan.add = null; lastScanned.add = null;
   document.getElementById('btnAdd').disabled = true;
-  document.getElementById('scanResultAdd').innerHTML = `<span class="srp-icon">⬡</span><div class="srp-text">Prêt pour le prochain scan…</div>`;
 }
 
+function confirmAdd() {
+  if (!pendingScan.add) return;
+  const { known, item } = pendingScan.add;
+  if (!known || !item) return;
+  processAdd(item);
+}
+
+/* ══════════════════════════════════════
+   SCAN CONSO
+══════════════════════════════════════ */
 function handleConsoScan(code) {
   const item = DB.items.find(i => i.barcode === code);
+
   if (!item) {
-    addLog('conso', 'red', 'Inconnu', code);
-    showToast('⚠ Produit non trouvé', 'red');
-    document.getElementById('scanResultConso').innerHTML = `<span class="srp-icon">❌</span><div class="srp-text"><strong>Code: ${code}</strong>Non trouvé.</div>`;
-    vibrate([50,50,150]);
+    // Unknown barcode — lookup + associate
+    vibrate();
+    showToast('Code scanné — recherche…', 'teal');
+    document.getElementById('scanResultConso').innerHTML = `<span class="srp-icon">🔍</span><div class="srp-text">Recherche Open Food Facts…</div>`;
+    lookupOFF(code).then(offData => {
+      document.getElementById('scanResultConso').innerHTML = offData && offData.name
+        ? `<span class="srp-icon">🍀</span><div class="srp-text"><strong>${offData.name}</strong>Associer à un article ?</div>`
+        : `<span class="srp-icon">❓</span><div class="srp-text"><strong>Code: ${code}</strong>Non trouvé. Association manuelle.</div>`;
+      openAssocModal(code, 'conso', offData);
+    });
     return;
   }
-  // Only scan available units
+
+  processConsoItem(item);
+}
+
+function processConsoItem(item) {
   const unit = item.units.find(u => u.status === 'available');
   if (!unit) {
     const standbyUnit = item.units.find(u => u.status === 'standby');
     if (standbyUnit) {
       showToast('⚠ ' + item.name + ' est en stand-by', 'orange');
-      document.getElementById('scanResultConso').innerHTML = `<span class="srp-icon">⏸</span><div class="srp-text"><strong>${item.name}</strong>En stand-by. Utilisez Admin pour activer.</div>`;
+      document.getElementById('scanResultConso').innerHTML = `<span class="srp-icon">⏸</span><div class="srp-text"><strong>${item.name}</strong>En stand-by. Admin requis pour activer.</div>`;
     } else {
-      addLog('conso', 'red', item.name, 'Déjà tout consommé');
+      addLog('conso', 'red', item.name, 'Tout déjà consommé');
       showToast('⚠ Tout déjà consommé', 'red');
       document.getElementById('scanResultConso').innerHTML = `<span class="srp-icon">⚠️</span><div class="srp-text"><strong>${item.name}</strong>Toutes les unités consommées.</div>`;
     }
