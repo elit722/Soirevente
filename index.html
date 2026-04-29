@@ -989,19 +989,25 @@ function fbPath(path) {
 }
 
 async function loadDB() {
-  try {
-    const snap = await window._fbGet(fbPath('soirevente'));
-    if (snap.exists()) {
-      DB = snap.val();
-      if (!DB.items) DB.items = [];
-      if (!DB.logs) DB.logs = [];
-    } else {
-      await initDefaultData();
-    }
-  } catch(e) {
-    console.error('Firebase load error', e);
-    showToast('⚠ Erreur Firebase', 'red');
-  }
+  return new Promise((resolve) => {
+    // onValue fires immediately with current data, then on every change
+    const unsub = window._fbOnValue(fbPath('soirevente'), async (snap) => {
+      if (snap.exists()) {
+        const val = snap.val();
+        DB = val;
+        if (!DB.items) DB.items = [];
+        if (!DB.logs) DB.logs = [];
+      } else {
+        // First time ever — init with catalog
+        await initDefaultData();
+      }
+      unsub(); // unsubscribe after first load; boot will re-attach persistent listener
+      resolve();
+    }, (err) => {
+      console.error('Firebase onValue error', err);
+      resolve(); // resolve anyway so boot doesn't hang
+    });
+  });
 }
 
 async function saveDB() {
@@ -1424,15 +1430,23 @@ function handleBarcode(code, mode) {
 ══════════════════════════════════════ */
 async function lookupOFF(barcode) {
   try {
-    const r = await fetch(`https://world.openfoodfacts.org/api/v2/product/${barcode}?fields=product_name,brands,categories_tags`, { signal: AbortSignal.timeout(5000) });
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 6000);
+    const r = await fetch(
+      `https://world.openfoodfacts.org/api/v2/product/${barcode}?fields=product_name,product_name_fr,brands`,
+      { signal: controller.signal }
+    );
+    clearTimeout(timer);
     if (!r.ok) return null;
     const d = await r.json();
     if (d.status !== 1 || !d.product) return null;
-    return {
-      name: d.product.product_name || '',
-      brand: d.product.brands || '',
-    };
-  } catch { return null; }
+    const name = (d.product.product_name_fr || d.product.product_name || '').trim();
+    const brand = (d.product.brands || '').trim();
+    return name ? { name, brand } : null;
+  } catch (e) {
+    console.warn('OFF lookup failed:', e && e.message);
+    return null;
+  }
 }
 
 /* ══════════════════════════════════════
@@ -1536,19 +1550,31 @@ function handleAdd(code) {
     return;
   }
 
-  // 2. Unknown — lookup OFF then show association modal
+  // 2. Unknown — open modal immediately with spinner, update after OFF fetch
   vibrate();
-  showToast('Code scanné — recherche…', 'teal');
+  showToast('Code scanné — association requise', 'teal');
   el.innerHTML = `<span class="srp-icon">🔍</span><div class="srp-text">Recherche Open Food Facts…</div>`;
   btn.disabled = true;
 
+  // Open modal right away with loading state
+  openAssocModal(code, 'add', 'loading');
+
   lookupOFF(code).then(offData => {
+    // Update the already-open modal with results
+    const offResult = document.getElementById('assocOffResult');
+    const offLoading = document.getElementById('assocOffLoading');
+    const offNotFound = document.getElementById('assocOffNotFound');
+    offLoading.classList.add('hidden');
     if (offData && offData.name) {
-      el.innerHTML = `<span class="srp-icon">🍀</span><div class="srp-text"><strong>${offData.name}</strong>${offData.brand ? offData.brand + ' · ' : ''}Associer à un article ?</div>`;
+      document.getElementById('assocOffName').textContent = offData.name;
+      document.getElementById('assocOffBrand').textContent = offData.brand || '';
+      offResult.classList.remove('hidden');
+      if (pendingAssoc) { pendingAssoc.offName = offData.name; pendingAssoc.offBrand = offData.brand; }
+      el.innerHTML = `<span class="srp-icon">🍀</span><div class="srp-text"><strong>${offData.name}</strong>Associer à un article ?</div>`;
     } else {
-      el.innerHTML = `<span class="srp-icon">❓</span><div class="srp-text"><strong>Code: ${code}</strong>Non trouvé sur Open Food Facts.<br>Association manuelle.</div>`;
+      offNotFound.classList.remove('hidden');
+      el.innerHTML = `<span class="srp-icon">❓</span><div class="srp-text"><strong>Code: ${code}</strong>Non trouvé. Association manuelle.</div>`;
     }
-    openAssocModal(code, 'add', offData);
   });
 }
 
@@ -1587,15 +1613,28 @@ function handleConsoScan(code) {
   const item = DB.items.find(i => i.barcode === code);
 
   if (!item) {
-    // Unknown barcode — lookup + associate
+    // Unknown barcode — open modal immediately, update after OFF fetch
     vibrate();
-    showToast('Code scanné — recherche…', 'teal');
+    showToast('Code scanné — association requise', 'teal');
     document.getElementById('scanResultConso').innerHTML = `<span class="srp-icon">🔍</span><div class="srp-text">Recherche Open Food Facts…</div>`;
+
+    openAssocModal(code, 'conso', 'loading');
+
     lookupOFF(code).then(offData => {
-      document.getElementById('scanResultConso').innerHTML = offData && offData.name
-        ? `<span class="srp-icon">🍀</span><div class="srp-text"><strong>${offData.name}</strong>Associer à un article ?</div>`
-        : `<span class="srp-icon">❓</span><div class="srp-text"><strong>Code: ${code}</strong>Non trouvé. Association manuelle.</div>`;
-      openAssocModal(code, 'conso', offData);
+      const offResult = document.getElementById('assocOffResult');
+      const offLoading = document.getElementById('assocOffLoading');
+      const offNotFound = document.getElementById('assocOffNotFound');
+      offLoading.classList.add('hidden');
+      if (offData && offData.name) {
+        document.getElementById('assocOffName').textContent = offData.name;
+        document.getElementById('assocOffBrand').textContent = offData.brand || '';
+        offResult.classList.remove('hidden');
+        if (pendingAssoc) { pendingAssoc.offName = offData.name; pendingAssoc.offBrand = offData.brand; }
+        document.getElementById('scanResultConso').innerHTML = `<span class="srp-icon">🍀</span><div class="srp-text"><strong>${offData.name}</strong>Associer à un article ?</div>`;
+      } else {
+        offNotFound.classList.remove('hidden');
+        document.getElementById('scanResultConso').innerHTML = `<span class="srp-icon">❓</span><div class="srp-text"><strong>Code: ${code}</strong>Non trouvé. Association manuelle.</div>`;
+      }
     });
     return;
   }
