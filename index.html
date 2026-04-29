@@ -1047,7 +1047,11 @@ async function loadDB() {
   });
 }
 
+let _localVersion = 0;
+
 async function saveDB() {
+  _localVersion++;
+  DB._v = _localVersion;
   try {
     await window._fbSet(fbPath('soirevente'), DB);
   } catch(e) {
@@ -1863,16 +1867,18 @@ async function boot() {
   updateHeader();
   doSearch();
 
-  // Listen for real-time updates
+  // Listen for real-time updates from OTHER clients only (ignore our own saves)
   window._fbOnValue(window._fbRef(window._fbDB, 'soirevente'), (snap) => {
-    if (snap.exists()) {
-      DB = snap.val();
-      if (!DB.items) DB.items = [];
-      if (!DB.logs) DB.logs = [];
-      renderMenu();
-      updateHeader();
-      doSearch();
-    }
+    if (!snap.exists()) return;
+    const remote = snap.val();
+    // If the version stamp matches our last local save, it's our own echo — skip
+    if (remote._v && remote._v === _localVersion) return;
+    DB = remote;
+    if (!DB.items) DB.items = [];
+    if (!DB.logs) DB.logs = [];
+    renderMenu();
+    updateHeader();
+    doSearch();
   });
 }
 
