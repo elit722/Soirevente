@@ -1701,7 +1701,9 @@ function processAdd(item) {
     showToast('✓ Unité ajoutée : ' + item.name, 'teal');
     el.innerHTML = `<span class="srp-icon">➕</span><div class="srp-text"><strong>${item.name}</strong>Nouvelle unité ajoutée.</div>`;
   }
-  saveDB(); updateHeader();
+  saveDB();
+  renderMenu();
+  updateHeader();
   pendingScan.add = null; lastScanned.add = null;
   document.getElementById('btnAdd').disabled = true;
 }
@@ -1754,21 +1756,18 @@ function handleConsoScan(code) {
 }
 
 function processConsoItem(item) {
-  const unit = item.units.find(u => u.status === 'available');
+  // Accept available first, then standby (no prior activation needed)
+  const unit = item.units.find(u => u.status === 'available') || item.units.find(u => u.status === 'standby');
   if (!unit) {
-    const standbyUnit = item.units.find(u => u.status === 'standby');
-    if (standbyUnit) {
-      showToast('⚠ ' + item.name + ' est en stand-by', 'orange');
-      document.getElementById('scanResultConso').innerHTML = `<span class="srp-icon">⏸</span><div class="srp-text"><strong>${item.name}</strong>En stand-by. Admin requis pour activer.</div>`;
-    } else {
-      addLog('conso', 'red', item.name, 'Tout déjà consommé');
-      showToast('⚠ Tout déjà consommé', 'red');
-      document.getElementById('scanResultConso').innerHTML = `<span class="srp-icon">⚠️</span><div class="srp-text"><strong>${item.name}</strong>Toutes les unités consommées.</div>`;
-    }
+    addLog('conso', 'red', item.name, 'Tout déjà consommé');
+    showToast('⚠ Tout déjà consommé', 'red');
+    document.getElementById('scanResultConso').innerHTML = `<span class="srp-icon">⚠️</span><div class="srp-text"><strong>${item.name}</strong>Toutes les unités consommées.</div>`;
     return;
   }
   unit.status = 'consumed';
-  saveDB(); updateHeader();
+  saveDB();
+  renderMenu();
+  updateHeader();
   const remaining = item.units.filter(u => u.status === 'available').length;
   document.getElementById('scanResultConso').innerHTML = `<span class="srp-icon">✅</span><div class="srp-text"><strong>${item.name}</strong>1 unité consommée · ${remaining} restante(s)</div>`;
   addLog('conso', 'green', item.name, `Consommé · ${remaining} restant(s)`);
@@ -1867,12 +1866,23 @@ async function boot() {
   updateHeader();
   doSearch();
 
-  // Listen for real-time updates from OTHER clients only (ignore our own saves)
+  // Listen for real-time updates — only apply if the data comes from another client
+  // We track a save counter: each local save bumps _localVersion and stamps DB._v.
+  // The Firebase echo of our own write will carry that same _v → skip it.
+  // A write from another device will have a different _v (or none) → apply it.
+  let _lastAppliedV = 0;
   window._fbOnValue(window._fbRef(window._fbDB, 'soirevente'), (snap) => {
     if (!snap.exists()) return;
     const remote = snap.val();
-    // If the version stamp matches our last local save, it's our own echo — skip
-    if (remote._v && remote._v === _localVersion) return;
+    const remoteV = remote._v || 0;
+    // Skip our own echoes
+    if (remoteV > 0 && remoteV >= _localVersion) {
+      _lastAppliedV = remoteV;
+      return;
+    }
+    // Also skip if we've already seen this version
+    if (remoteV > 0 && remoteV <= _lastAppliedV) return;
+    _lastAppliedV = remoteV;
     DB = remote;
     if (!DB.items) DB.items = [];
     if (!DB.logs) DB.logs = [];
