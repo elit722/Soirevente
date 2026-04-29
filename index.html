@@ -233,6 +233,27 @@
       font-family: 'Space Mono', monospace;
     }
 
+    /* ── PROGRESS BARS ── */
+    .progress-section {
+      margin-bottom: 18px;
+      background: linear-gradient(135deg, var(--bg2), var(--bg3));
+      border: 1px solid var(--border); border-radius: var(--radius); padding: 14px 16px;
+    }
+    .progress-row { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; }
+    .progress-row:last-child { margin-bottom: 0; }
+    .progress-header { display: flex; justify-content: space-between; align-items: center; }
+    .progress-label { font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--text-dim); font-family: 'Space Mono', monospace; }
+    .progress-value { font-size: 11px; font-family: 'Space Mono', monospace; color: var(--text-mid); }
+    .progress-track {
+      height: 6px; background: rgba(255,255,255,0.05); border-radius: 3px; overflow: hidden;
+    }
+    .progress-fill {
+      height: 100%; border-radius: 3px;
+      transition: width 0.6s cubic-bezier(.34,1.2,.64,1);
+    }
+    .progress-fill.available { background: linear-gradient(90deg, var(--teal), var(--teal2)); }
+    .progress-fill.consumed { background: linear-gradient(90deg, var(--red), #ff8fab); }
+
     /* ── STAT BAR ── */
     .stat-bar { display: flex; gap: 8px; margin-bottom: 16px; }
     .stat-chip {
@@ -764,6 +785,22 @@
     <!-- ── MENU VIEW ── -->
     <div class="view active" id="view-menu">
       <div class="stat-bar" id="statBar"></div>
+      <div class="progress-section" id="progressSection">
+        <div class="progress-row">
+          <div class="progress-header">
+            <span class="progress-label">Disponibles</span>
+            <span class="progress-value" id="progAvailText">—</span>
+          </div>
+          <div class="progress-track"><div class="progress-fill available" id="progAvailBar" style="width:0%"></div></div>
+        </div>
+        <div class="progress-row">
+          <div class="progress-header">
+            <span class="progress-label">Consommés</span>
+            <span class="progress-value" id="progConsText">—</span>
+          </div>
+          <div class="progress-track"><div class="progress-fill consumed" id="progConsBar" style="width:0%"></div></div>
+        </div>
+      </div>
       <p class="section-label">Catégories</p>
       <div class="meal-grid" id="mealGrid"></div>
     </div>
@@ -1010,12 +1047,18 @@ async function loadDB() {
   });
 }
 
+let _isSaving = false;
+
 async function saveDB() {
+  _isSaving = true;
   try {
     await window._fbSet(fbPath('soirevente'), DB);
   } catch(e) {
     console.error('Firebase save error', e);
     showToast('⚠ Erreur sauvegarde', 'red');
+  } finally {
+    // Short grace period so the onValue echo doesn't overwrite our local state
+    setTimeout(() => { _isSaving = false; }, 1500);
   }
 }
 
@@ -1244,6 +1287,15 @@ function renderMenu() {
     <div class="stat-chip"><div class="stat-num">${consumed}</div><div class="stat-lbl">Conso</div></div>
     <div class="stat-chip"><div class="stat-num">${standby}</div><div class="stat-lbl">Stand-by</div></div>
   `;
+
+  // Update progress bars
+  const pct = v => total > 0 ? Math.round(v / total * 100) : 0;
+  const availPct = pct(available);
+  const consPct = pct(consumed);
+  document.getElementById('progAvailText').textContent = `${available} / ${total} (${availPct}%)`;
+  document.getElementById('progConsText').textContent = `${consumed} / ${total} (${consPct}%)`;
+  document.getElementById('progAvailBar').style.width = availPct + '%';
+  document.getElementById('progConsBar').style.width = consPct + '%';
 
   const grid = document.getElementById('mealGrid');
   if (DB.items.length === 0) {
@@ -1498,11 +1550,10 @@ async function openAssocModal(code, mode, offData) {
 
 function closeAssoc() {
   document.getElementById('assocModal').classList.add('hidden');
-  pendingAssoc = null;
-  // Re-allow same barcode to be scanned
-  if (pendingAssoc) lastScanned[pendingAssoc.mode] = null;
+  // Reset lastScanned before nulling pendingAssoc
   lastScanned.add = null;
   lastScanned.conso = null;
+  pendingAssoc = null;
 }
 
 function confirmAssoc(itemId) {
@@ -1639,6 +1690,8 @@ function handleConsoScan(code) {
     return;
   }
 
+  // Product found in DB — process directly, no modal
+  document.getElementById('scanResultConso').innerHTML = `<span class="srp-icon">✅</span><div class="srp-text"><strong>${item.name}</strong>Produit reconnu…</div>`;
   processConsoItem(item);
 }
 
@@ -1758,12 +1811,14 @@ async function boot() {
 
   // Listen for real-time updates
   window._fbOnValue(window._fbRef(window._fbDB, 'soirevente'), (snap) => {
+    if (_isSaving) return; // Ignore our own echo
     if (snap.exists()) {
       DB = snap.val();
       if (!DB.items) DB.items = [];
       if (!DB.logs) DB.logs = [];
       renderMenu();
       updateHeader();
+      doSearch();
     }
   });
 }
